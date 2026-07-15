@@ -74,28 +74,31 @@ Keep every benchmark on the **same** GPU so the numbers are comparable.
 
 ## Benchmark summary
 
-> ⏳ **Placeholder tables — fill in from the Colab run** (`run_on_colab.ipynb` prints
-> these and writes `benchmarks/results/*.csv`).
-
-**Environment:** _GPU · CUDA · driver · PyTorch — record after running._
+Measured on a single **NVIDIA Tesla T4** (Google Colab) — CUDA 12.8, driver 580.82.07,
+PyTorch 2.11.0+cu128. Each number is the **median of 100+ CUDA-event-timed runs** after
+warmup. Raw data in [`benchmarks/results/`](benchmarks/results/).
 
 ### Matmul (square N×N, GFLOPS = 2N³/t)
 
-| N | naive (ms) | tiled (ms) | torch/cuBLAS (ms) | tiled GFLOPS | tiled vs naive | % of cuBLAS |
-|---|-----------|-----------|-------------------|--------------|----------------|-------------|
-| 512 | — | — | — | — | — | — |
-| 1024 | — | — | — | — | — | — |
-| 2048 | — | — | — | — | — | — |
-| 4096 | — (skipped) | — | — | — | — | — |
+| N | naive (ms) | tiled (ms) | cuBLAS (ms) | tiled GFLOPS | tiled vs naive | % of cuBLAS |
+|---|----------:|----------:|-----------:|-------------:|---------------:|------------:|
+| 512  | 0.836 | 0.545 | 0.105 | 493 | 1.53× | 19.3% |
+| 1024 | 4.521 | 2.835 | 0.496 | 758 | 1.60× | 17.5% |
+| 2048 | 41.553 | 27.387 | 4.641 | 627 | 1.52× | 16.9% |
+| 4096 | not run¹ | 223.081 | 38.396 | 616 | — | 17.2% |
+
+¹ Naive is capped at N≤2048 in `benchmark.py` and never executed at 4096 — it's
+impractically slow there (O(N³) work with zero data reuse). Not an out-of-memory error:
+a 4096² fp32 matrix is only ~64 MB, and all three fit easily on the 16 GB T4.
 
 ### Other kernels
 
 | Kernel | Size | Custom (ms) | PyTorch (ms) | Speedup | Bottleneck |
-|--------|------|-------------|--------------|---------|------------|
-| vector_add | n=2²⁶ | — | — | — | memory-bound |
-| softmax | 4096×16384 | — | — | — | memory-bound |
-| layernorm | 8192×4096 | — | — | — | memory-bound |
-| attention | seq=1024, d=64 | — | — (vs SDPA) | — | memory-bound (O(seq²) HBM) |
+|--------|------|------------:|-------------:|--------:|------------|
+| vector_add | n=2²⁶ (67M) | 3.390 | 3.359 | 0.99× | memory-bound |
+| softmax | 4096×16384 | 5.728 | 3.117 | 0.54× | memory-bound |
+| layernorm | 8192×4096 | 1.599 | 1.651 | 1.03× | memory-bound |
+| attention | seq=1024, d=64 | 1.540 | 0.238 (SDPA) | 0.15× | memory-bound (O(seq²) HBM) |
 
 ## Key optimization: naive → tiled matmul
 
@@ -110,9 +113,14 @@ and every thread in the block reuses each staged value `TILE` times before advan
 along `K`. That raises **arithmetic intensity**: global-memory traffic drops by ~`TILE`
 (≈16×), moving the kernel off the bandwidth wall toward being **compute-bound**. Two
 `__syncthreads()` barriers keep the shared tile consistent (fully loaded before use;
-fully read before it's overwritten). This is why tiled pulls far ahead of naive as
-matrices grow — quantify it from the benchmark table above, then profile it
-(`profiling/nsys_matmul_report.md`) to confirm the DRAM-traffic drop.
+fully read before it's overwritten).
+
+On the T4 above, tiling buys a **~1.5× speedup over naive** and reaches **~17% of
+cuBLAS**. The theoretical 16× cut in *global loads* doesn't become a 16× wall-clock win:
+this basic 16×16 tiling still issues uncoalesced global loads and computes only one
+output per thread, so it stays partly memory- and overhead-bound. Closing the remaining
+~6× gap to cuBLAS is exactly what coalescing, register blocking, and warptiling do (see
+Future work). Profile it (`profiling/nsys_matmul_report.md`) to watch the DRAM-traffic drop directly.
 
 Possible next steps (documented, not yet implemented): register blocking (each thread
 computes a micro-tile of outputs), shared-memory padding to avoid bank conflicts, and

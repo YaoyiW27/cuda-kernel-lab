@@ -1,0 +1,29 @@
+# Compiled CUDA / C artifacts
+*.o
+*.so
+*.out
+*.exe
+build/
+bin/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+.ipynb_checkpoints/
+
+# Benchmark / profiling raw output (keep summarized results committed manually)
+*.qdrep
+*.qdstrm
+*.nsys-rep
+*.ncu-rep
+profiling/*.sqlite
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+cuda-kernel-mini-lab-plan.md

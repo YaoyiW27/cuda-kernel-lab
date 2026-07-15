@@ -1,0 +1,6 @@
+# Python dependencies for correctness tests, benchmarks, and plotting.
+# Install torch matching your CUDA version — see https://pytorch.org/get-started/locally/
+torch
+numpy
+pandas
+matplotlib

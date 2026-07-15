@@ -27,8 +27,10 @@ profiling/*.sqlite
 .idea/
 .vscode/
 
-# Local-only project plan (kept locally, never published)
+# Local-only personal files (kept locally, never published)
 cuda-kernel-mini-lab-plan.md
+resume*.tex
+resume*.pdf
 
 # Agent tooling (local only)
 .agents/

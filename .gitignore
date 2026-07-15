@@ -27,3 +27,6 @@ profiling/*.sqlite
 .idea/
 .vscode/
 cuda-kernel-mini-lab-plan.md
+.agents/
+docs/agents/
+skills-lock.json

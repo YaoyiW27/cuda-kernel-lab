@@ -15,7 +15,7 @@ kernels are memory-bound vs. compute-bound.
 | # | Kernel | Core concept | Status |
 |---|--------|--------------|--------|
 | 1 | Vector Add | CUDA programming model, grid-stride loops, launch overhead, GB/s | ✅ implemented |
-| 2 | **Matrix Multiply** | **naive → tiled shared-memory matmul** (the headline optimization) | ✅ implemented |
+| 2 | **Matrix Multiply** | **naive → tiled shared-memory matmul** (the central optimization studied here) | ✅ implemented |
 | 3 | Softmax | parallel reduction + numerical stability (subtract row max) | ✅ implemented |
 | 4 | LayerNorm | **fused single-pass** mean/variance via `E[x²] − E[x]²` | ✅ implemented |
 | 5 | Attention Score | `softmax(QKᵀ/√d)·V` — composing matmul + softmax | ✅ implemented |
@@ -72,11 +72,12 @@ Keep every benchmark on the **same** GPU so the numbers are comparable.
   `1e-2/1e-3` because float32 accumulation order differs from cuBLAS (expected, not a bug).
 - **Reporting:** GPU model, CUDA version, driver, and PyTorch version recorded with results.
 
-## Benchmark summary
+## Results
 
 Measured on a single **NVIDIA Tesla T4** (Google Colab) — CUDA 12.8, driver 580.82.07,
 PyTorch 2.11.0+cu128. Each number is the **median of 100+ CUDA-event-timed runs** after
-warmup. Raw data in [`benchmarks/results/`](benchmarks/results/).
+warmup. Raw data in [`benchmarks/results/`](benchmarks/results/). T4 reference ceilings:
+**~320 GB/s** memory bandwidth, **~8.1 TFLOP/s** FP32.
 
 ### Matmul (square N×N, GFLOPS = 2N³/t)
 
@@ -99,6 +100,59 @@ a 4096² fp32 matrix is only ~64 MB, and all three fit easily on the 16 GB T4.
 | softmax | 4096×16384 | 5.728 | 3.117 | 0.54× | memory-bound |
 | layernorm | 8192×4096 | 1.599 | 1.651 | 1.03× | memory-bound |
 | attention | seq=1024, d=64 | 1.540 | 0.238 (SDPA) | 0.15× | memory-bound (O(seq²) HBM) |
+
+## Analysis
+
+Read off the CSVs in `benchmarks/results/`. Three patterns hold across the whole suite.
+
+**1. Fixed dispatch overhead dominates small inputs.** Every kernel posts its worst ratio
+vs. PyTorch at its *smallest* size — vector_add 0.57× at n=64K, softmax 0.09× at 128 cols,
+layernorm 0.46× at 256 cols. The custom path pays a tens-of-µs kernel-launch + `ctypes`
+marshalling cost that torch's C++ dispatch avoids; it only amortizes once the kernel does
+enough work. The small-input ratios are overhead-bound, not kernel-bound.
+
+**2. The bandwidth-bound kernels already match PyTorch — and can't beat it.** vector_add
+peaks at **251 GB/s ≈ 78% of the 320 GB/s roof** (0.99–1.05× torch across large n);
+layernorm reaches **179 GB/s** and edges torch at 4096 cols (1.03×). Once a kernel is
+memory-bound and near the bandwidth ceiling, "faster" is not on the menu — *matching* a
+tuned library is the ceiling. This is the most useful result in the repo: it's direct
+evidence the memory-bound diagnosis is correct.
+
+**3. Every remaining gap is a reuse/fusion gap, not a raw-compute gap.** The three kernels
+that trail torch each leave memory traffic on the table, and each has a known fix:
+
+- **matmul** — tiled reaches ~758 GFLOP/s (**9% of FP32 peak, 17% of cuBLAS**). The 16×16
+  tile cuts *global loads* ~16× in theory but buys only ~1.5× wall-clock: one output per
+  thread → low per-thread arithmetic intensity, uncoalesced `B` loads, and sync overhead.
+  Note tiled GFLOP/s *peaks at N=1024 (758) then falls* (627 at 2048, 616 at 4096) as the
+  working set outgrows L2. Fix: register/2D blocking + coalescing — see *naive → tiled
+  matmul* below.
+- **softmax** — peaks at **186 GB/s (58% of roof)** at 4096 cols but *drops to 94 GB/s* at
+  16384. It's a 3-pass kernel (max → exp+sum → normalize) that re-reads the row; once a row
+  (64 KB at 16384) spills L1, the re-reads hit farther-out memory and effective throughput
+  falls. Fix: single-pass "online" softmax + warp-shuffle reductions. (The GB/s figure
+  counts only minimal read-x/write-y traffic, so it *understates* the true 3-pass traffic.)
+- **layernorm** — best in the suite. The **fused single-pass** (accumulate Σx and Σx²
+  together, then `var = E[x²] − E[x]²`) reads x once and holds 0.82–1.03× of torch at hidden
+  sizes ≥ 1024. Direct confirmation that the fusion is worth it.
+- **attention** — 0.15× of SDPA at seq ≥ 1024, with time growing O(seq²) (0.10 → 5.93 ms as
+  seq 128 → 2048). It's three separate kernels (naive QKᵀ, tree-softmax, naive ·V) that all
+  materialize the seq×seq scores in HBM. SDPA runs a FlashAttention backend that tiles and
+  fuses, never writing seq² to HBM — hence the ~6–7× gap. Custom only "wins" (1.4×) at
+  seq=128, where SDPA's fixed overhead dominates. See *A note on FlashAttention* below.
+
+## Caveats / threats to validity
+
+- **Python + `ctypes` dispatch** adds fixed per-call overhead absent from torch's native
+  dispatch, penalizing the custom kernels at small sizes. Treat small-input ratios as a
+  measure of overhead, not kernel quality.
+- **The GB/s model counts intended traffic only** (one read of inputs, one write of
+  outputs). Multi-pass kernels (softmax) move more, so their effective GB/s understates real
+  DRAM traffic — `ncu` would give the true byte counts.
+- **Single T4, fp32, one machine.** Each cell is a median of 100+ runs, but only one such
+  median — no cross-run variance is reported. cuBLAS/SDPA may switch algorithms by size, so
+  this is a "custom vs. whatever torch dispatches" comparison: the honest real-world
+  baseline, not an algorithm-matched one.
 
 ## Key optimization: naive → tiled matmul
 

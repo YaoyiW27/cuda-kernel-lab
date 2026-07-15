@@ -26,7 +26,21 @@ profiling/*.sqlite
 .DS_Store
 .idea/
 .vscode/
+
+# Local-only project plan (kept locally, never published)
 cuda-kernel-mini-lab-plan.md
+
+# Agent tooling (local only)
 .agents/
 docs/agents/
 skills-lock.json
+
+# Teaching workspace — personal learning files, NEVER commit (see CLAUDE.md)
+MISSION.md
+NOTES.md
+GLOSSARY.md
+RESOURCES.md
+lessons/
+learning-records/
+reference/
+assets/
